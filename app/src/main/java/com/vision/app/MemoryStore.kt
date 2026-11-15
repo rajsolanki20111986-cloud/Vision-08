@@ -26,7 +26,7 @@ data class Turn(val ts: Long, val source: String, val user: Boolean, val text: S
 object MemoryStore {
     private const val MAX_LOG_LINES = 2000
     private const val MAX_FILE_CHARS = 200_000
-    private const val CACHE_TURNS = 400
+    private const val CACHE_TURNS = 1500
     private val lock = Any()
     private lateinit var root: File
     private lateinit var log: File
@@ -48,7 +48,7 @@ object MemoryStore {
     fun init(ctx: Context) {
         if (::root.isInitialized) return
         root = File(ctx.filesDir, "memory").apply { mkdirs() }
-        listOf("facts", "routines", "projects", "skills").forEach { File(root, it).mkdirs() }
+        listOf("facts", "routines", "projects", "skills", "history").forEach { File(root, it).mkdirs() }
         log = File(root, "conversation.jsonl")
         val profile = File(root, "profile.md")
         if (!profile.exists()) profile.writeText("# Profile\n")
@@ -182,6 +182,15 @@ object MemoryStore {
                 out.add(Chunk(p, text.take(400), toks))
             }
         }
+        // Older conversation turns (everything except the newest 20) are searchable too,
+        // so Vision can recall what was said days ago. The newest turns are sent as history anyway.
+        val fmt = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+        for (t in cache.toList().dropLast(20).takeLast(800)) {
+            val toks = tokens(t.text)
+            if (toks.isEmpty()) continue
+            val who = if (t.user) "He said: " else "Vision said: "
+            out.add(Chunk("history " + fmt.format(java.util.Date(t.ts)), who + t.text.take(300), toks))
+        }
         return out
     }
 
@@ -223,6 +232,73 @@ object MemoryStore {
         }
     }
 
+    // ------------------------------------------------------------------ skills
+
+    private val SKILL_GENERIC = setOf(
+        "open", "app", "apps", "skill", "skills", "start", "launch", "kholo", "khol", "karo", "kar", "chalao", "chalu",
+        "when", "say", "says", "step", "steps", "then", "and", "go", "goto", "tap", "click", "play", "watch", "trigger",
+        "खोलो", "खोल", "करो", "ऐप", "एप", "चलाओ", "चालू"
+    )
+
+    private fun slug(s: String): String = norm(s).split(SPLIT).filter { it.isNotEmpty() }.joinToString("-").take(40)
+
+    /** Words that wake a skill: its file name, its title, and its "trigger:" line. */
+    private fun skillKeys(path: String, body: String): Set<String> {
+        val keys = HashSet<String>()
+        keys.addAll(tokens(path.substringAfterLast('/').removeSuffix(".md").removeSuffix(".txt")))
+        val lines = body.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        lines.firstOrNull { it.startsWith("#") }?.let { keys.addAll(tokens(it)) }
+        lines.firstOrNull { it.lowercase().startsWith("trigger") }?.let { keys.addAll(tokens(it.substringAfter(':'))) }
+        return keys.filter { it !in SKILL_GENERIC && it.length >= 3 }.toSet()
+    }
+
+    /**
+     * Skills whose words appear in what he just said, best match first. The app uses this to
+     * (1) put the skill's steps in front of the model for this very message and (2) skip the fast path.
+     */
+    fun matchSkills(text: String, limit: Int = 2): List<String> {
+        if (!::root.isInitialized || text.isBlank()) return emptyList()
+        val q = tokens(text)
+        if (q.isEmpty()) return emptyList()
+        return synchronized(lock) {
+            val scored = ArrayList<Pair<Int, String>>()
+            for (p in list().filter { it.startsWith("skills/") }) {
+                val body = read(p) ?: continue
+                val hit = skillKeys(p, body).count { k ->
+                    q.any { w -> w == k || (k.length >= 4 && w.length >= 4 && (w.startsWith(k) || k.startsWith(w))) }
+                }
+                if (hit > 0) scored.add(Pair(hit, "[" + p + "]\n" + body.trim().take(1800)))
+            }
+            scored.sortedByDescending { it.first }.take(limit).map { it.second }
+        }
+    }
+
+    /** Tool use_skill: the steps of a skill by name, or the best match for a request. */
+    fun useSkill(nameOrRequest: String): String {
+        if (!::root.isInitialized) return "No skills yet."
+        val s = slug(nameOrRequest)
+        val direct = synchronized(lock) {
+            list().firstOrNull { it.startsWith("skills/") && it.substringAfterLast('/').removeSuffix(".md") == s }
+                ?.let { read(it) }
+        }
+        if (direct != null) return direct
+        val m = matchSkills(nameOrRequest, 1)
+        if (m.isNotEmpty()) return m.first()
+        val all = synchronized(lock) { list().filter { it.startsWith("skills/") } }
+        return "No skill matches '" + nameOrRequest + "'. Skills: " + all.joinToString().ifBlank { "none yet" }
+    }
+
+    /** Tool skill_save: writes a well-formed skill file. */
+    fun saveSkill(name: String, trigger: String, steps: String): String {
+        if (!::root.isInitialized) return "Memory is not ready."
+        val s = slug(name)
+        if (s.isEmpty() || steps.isBlank()) return "A skill needs a name and its steps."
+        SafetyRules.refusal(steps)?.let { return "Refused: $it" }
+        val body = "# " + name.trim() + "\ntrigger: " + trigger.trim() +
+            "\nsteps (do ALL of them in order, to the end, without asking):\n" + steps.trim() + "\n"
+        return write("skills/$s.md", body)
+    }
+
     private fun recentUserText(): String =
         turns(12).filter { it.user }.takeLast(3).joinToString(" ") { it.text.take(300) }
 
@@ -261,15 +337,21 @@ object MemoryStore {
             read("profile.md")?.trim()?.takeIf { it.length > 10 }?.let {
                 sb.append("\n--- profile.md ---\n").append(it.take(1500)).append('\n')
             }
+            val skillFiles = list().filter { it.startsWith("skills/") }
+            if (skillFiles.isNotEmpty()) {
+                sb.append("\nSKILLS (his exact instructions. When his request matches one, the same app or task, do what it says first: ALL steps in order, to the end, without asking. Call use_skill if you need the steps again):\n")
+            }
             var skillBudget = 2500
-            for (p in list().filter { it.startsWith("skills/") }) {
+            for (p in skillFiles) {
                 if (skillBudget <= 0) break
                 val body = read(p).orEmpty().take(skillBudget)
                 skillBudget -= body.length
                 sb.append("\n--- ").append(p).append(" ---\n").append(body).append('\n')
                 shown.add(p)
             }
-            val hits = rank(q, 14).filter { it.first.path !in shown }
+            val ranked = rank(q, 30).filter { it.first.path !in shown }
+            val hits = ranked.filter { !it.first.path.startsWith("history ") }.take(10) +
+                ranked.filter { it.first.path.startsWith("history ") }.take(4)
             if (hits.isNotEmpty()) {
                 sb.append("\nRELEVANT MEMORY (matched to the current topic):\n")
                 var b = 2200
@@ -280,9 +362,9 @@ object MemoryStore {
                     sb.append(line)
                 }
             }
-            val others = list().filter { it !in shown }
+            val others = list().filter { it !in shown && !it.startsWith("history/") }
             if (others.isNotEmpty()) {
-                sb.append("\nOTHER MEMORY FILES (find with memory_search, open with memory_read):\n")
+                sb.append("\nOTHER MEMORY FILES (find with memory_search, open with memory_read; daily summaries of old chats are in history/ and old messages are searchable too):\n")
                 var b = 1200
                 for (p in others) {
                     val line = "- $p\n"
