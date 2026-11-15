@@ -5,14 +5,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.json.JSONArray
+import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The memory keeper. It runs by itself in the background, so Vision does not have to remember to save.
  * After a voice session ends, or after every 6 of his text messages, it reads the new part of the
- * shared history, asks Gemini (no tools, low thinking) for lasting facts only, and appends them to the
- * memory files. Nothing is rewritten or deleted, repeated lines are skipped, and anything that looks like
- * a code, PIN, bank or money detail is dropped before saving (SafetyRules).
+ * shared history and asks Gemini (no tools, low thinking) for two things:
+ *   1. lasting facts, appended to profile.md, facts/, routines/ or projects/
+ *   2. a short summary of what was discussed or done, appended to history/<date>.md
+ * so Vision can also recall what happened on earlier days.
+ * Nothing is rewritten or deleted, repeated lines are skipped, and anything that looks like a code,
+ * PIN, bank or money detail is dropped before saving (SafetyRules).
  */
 object MemoryKeeper {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -20,13 +24,15 @@ object MemoryKeeper {
     @Volatile private var doneUntil = 0L
 
     private const val SYSTEM = """You keep the long-term memory of a personal phone assistant called Vision.
-From the conversation, extract ONLY durable facts about the user: who he is, preferences, people in his life, projects and the decisions he made, routines, and standing instructions.
-Skip small talk, one-off questions, tool results, and anything Vision said that he did not confirm.
+From the conversation, extract two things.
+1. Durable facts about the user: who he is, preferences, people in his life, projects and the decisions he made, routines, and standing instructions. Skip small talk, one-off questions, tool results, and anything Vision said that he did not confirm.
+2. A short summary (1 or 2 sentences) of what was discussed or done in this conversation, including any decision or unfinished task.
 Never include passwords, PINs, OTPs, card or account numbers, or any bank or money detail.
 Do not repeat anything listed under ALREADY KNOWN.
-Write each fact as one short sentence in the language he used.
-Answer with a JSON array of at most 5 objects like {"path":"facts/topic.md","line":"one short sentence"}, or [] if there is nothing new.
-Allowed paths: profile.md (who he is), facts/<topic>.md, routines/<topic>.md, projects/<topic>.md. Use short lowercase topic names with hyphens."""
+Write in the language he used.
+Answer with one JSON object: {"facts":[{"path":"facts/topic.md","line":"one short sentence"}],"summary":"..."}.
+facts has at most 8 items and may be empty. summary may be "" if there was only small talk.
+Allowed paths: profile.md (who he is), facts/<topic>.md, routines/<topic>.md, projects/<topic>.md. Use short lowercase topic names with hyphens. Do not write skills; those are saved separately."""
 
     fun maybeRun(force: Boolean = false) {
         if (!Prefs.memoryOn || Prefs.apiKey.isBlank()) return
@@ -54,11 +60,14 @@ Allowed paths: profile.md (who he is), facts/<topic>.md, routines/<topic>.md, pr
 
     private fun apply(raw: String) {
         val clean = raw.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
-        val arr = runCatching { JSONArray(clean) }.getOrNull() ?: return
+        val obj = runCatching { JSONObject(clean) }.getOrNull()
+        val facts = obj?.optJSONArray("facts") ?: runCatching { JSONArray(clean) }.getOrNull() ?: JSONArray()
+        val summary = obj?.optString("summary").orEmpty().trim().take(400)
+
         var saved = 0
-        for (i in 0 until arr.length()) {
-            if (saved >= 5) break
-            val o = arr.optJSONObject(i) ?: continue
+        for (i in 0 until facts.length()) {
+            if (saved >= 8) break
+            val o = facts.optJSONObject(i) ?: continue
             val path = o.optString("path").trim()
             val line = o.optString("line").trim().take(300)
             if (line.length < 6) continue
@@ -67,6 +76,13 @@ Allowed paths: profile.md (who he is), facts/<topic>.md, routines/<topic>.md, pr
                 path.startsWith("routines/") || path.startsWith("projects/")
             if (!okPath) continue
             if (MemoryStore.write(path, "- $line", append = true).startsWith("Saved")) saved++
+        }
+
+        if (summary.length >= 10 && SafetyRules.refusal(summary) == null) {
+            val now = java.util.Date()
+            val day = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(now)
+            val hm = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(now)
+            MemoryStore.write("history/$day.md", "- $hm $summary", append = true)
         }
     }
 }
