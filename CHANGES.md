@@ -41,7 +41,7 @@
 - LiveSession.sendText used clientContent. gemini-3.1-flash-live accepts clientContent only to seed history, so notification alerts during a call were probably ignored. It now uses realtimeInput.text, as the Live API guide says.
 
 ## Not verified
-- Nothing was compiled or run here (no Kotlin compiler). Skills he already made in free form still work: they are matched by file name and title. Re-teaching them once with skill_save gives them proper trigger words.
+- Not compiled here. Skills he already made in free form still work: they are matched by file name and title. Re-teaching them once with skill_save gives them proper trigger words.
 - Live voice reads skills when the session connects; a skill taught during the same call becomes active from the next call, but use_skill works at once.
 
 # v0.6 - Fix, power button, live chat agent
