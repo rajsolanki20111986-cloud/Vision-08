@@ -34,6 +34,12 @@ object ToolRouter {
         for (i in 0 until perm.length()) put(perm.get(i))
         put(d("memory_search", "Search memory by topic and get the matching lines in ONE call. Use this instead of memory_list plus memory_read.",
             "query" to "topic words, e.g. game server or Rahul birthday"))
+        put(d("skill_save", "Save a skill: something he taught you to do. Use it whenever he says 'learn this', 'save this as a skill' or explains how to do a task. Write the steps exactly as he said them, in order, including the last step he wants (for example: start watching stories).",
+            "name" to "short name, e.g. instagram stories",
+            "trigger" to "words he will say to start it, in English and Hindi, comma separated, e.g. instagram, insta, इंस्टाग्राम",
+            "steps" to "numbered steps in order"))
+        put(d("use_skill", "Get the exact steps of a skill he taught you. Call it FIRST when his request matches the SKILLS list (same app or task), then do ALL the steps to the end.",
+            "name" to "skill name or his request"))
         put(d("memory_list", "List all memory files. Rarely needed; memory_search is faster."))
         put(d("memory_read", "Read one memory file.", "path" to "e.g. profile.md or skills/whatsapp-reply.md"))
         put(d("memory_write", "Create or fully rewrite a memory file. Use it for a skill, a routine, a project or a fact he gave you.",
@@ -84,7 +90,7 @@ object ToolRouter {
         if (r != "Unknown tool: $name") return r
 
         when (name) {
-            "memory_search", "memory_list", "memory_read", "memory_write", "memory_append" -> return memoryTool(name, a)
+            "memory_search", "memory_list", "memory_read", "memory_write", "memory_append", "skill_save", "use_skill" -> return memoryTool(name, a)
             "post_to_chat" -> {
                 MemoryStore.addTurn("voice", false, a.optString("content"))
                 return "Shown in the chat screen."
@@ -144,6 +150,8 @@ object ToolRouter {
     private fun memoryTool(name: String, a: JSONObject): String {
         if (!Prefs.memoryOn) return "Memory is switched off in Vision settings."
         return when (name) {
+            "skill_save" -> MemoryStore.saveSkill(a.optString("name"), a.optString("trigger"), a.optString("steps"))
+            "use_skill" -> MemoryStore.useSkill(a.optString("name"))
             "memory_search" -> MemoryStore.search(a.optString("query"))
             "memory_list" -> MemoryStore.list().joinToString("\n").ifBlank { "No memory files yet." }
             "memory_read" -> MemoryStore.read(a.optString("path")) ?: "No such file: ${a.optString("path")}"
