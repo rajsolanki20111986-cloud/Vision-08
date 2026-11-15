@@ -20,15 +20,23 @@ object ChatEngine {
     suspend fun reply(app: Context): String = withContext(Dispatchers.IO) {
         val turns = MemoryStore.turns(24)
         val lastUser = turns.lastOrNull { it.user }?.text.orEmpty()
-        // Plain phone commands (torch, volume, next song, open app, battery) never wait for the model.
-        FastPath.tryHandle(app, lastUser)?.let { return@withContext it }
+        // A skill he taught for this request (same app or task) always wins: the model gets its steps.
+        val skills = MemoryStore.matchSkills(lastUser)
+        // Plain phone commands (torch, volume, next song, open app, battery) never wait for the model,
+        // except when a skill matches, because then "open Instagram" means the whole skill.
+        if (skills.isEmpty()) FastPath.tryHandle(app, lastUser)?.let { return@withContext it }
         val lang = LanguageDetector.detectLanguage(lastUser)
         val system = Persona.PROMPT + Persona.TEXT_NOTE + "\n" + LanguageDetector.getLanguagePrompt(lang) +
-            "\n\n" + MemoryStore.contextBlock(includeTurns = false, query = lastUser)
+            "\n\n" + MemoryStore.contextBlock(includeTurns = false, query = lastUser) +
+            (if (skills.isEmpty()) "" else
+                "\n\nACTIVE SKILL (matched to this request; these are his exact instructions):\n" + skills.joinToString("\n\n") +
+                "\n\nDo ALL the steps in order, to the end, without asking whether to continue. Say you are done only after the last step. " +
+                "Ignore the skill only if it clearly does not fit this request.")
+        val maxSteps = if (skills.isEmpty()) 4 else 12
         val contents = buildContents(turns)
         val tools = JSONArray().put(JSONObject().put("functionDeclarations", ToolRouter.declarations()))
 
-        for (step in 0 until 4) {
+        for (step in 0 until maxSteps) {
             val body = JSONObject()
                 .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
                 .put("contents", contents)
@@ -79,7 +87,7 @@ object ChatEngine {
                 responses.put(JSONObject().put("inlineData", JSONObject().put("mimeType", "image/jpeg").put("data", b64)))
             }
             contents.put(JSONObject().put("role", "user").put("parts", responses))
-            if (step == 3) break
+            if (step == maxSteps - 1) break
         }
         "I used up my tool steps for this message. Please ask again in a shorter way."
     }
