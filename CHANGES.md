@@ -1,3 +1,23 @@
+# v0.9 - Skills that are really followed, longer memory
+
+## Why skills were ignored (found in the code)
+- "Open Instagram" went to the open_app tool: the voice rules said to prefer direct system tools and never read the screen, and in v0.8 the FastPath opened the app without asking the model at all. The skill file was only one of many files in the prompt.
+- A text turn could use only 4 tool steps, too few for open app, go to stories, start watching.
+
+## Skills
+- New tools skill_save(name, trigger, steps) and use_skill(name). skill_save writes a clean file: title, "trigger:" words in English and Hindi, numbered steps.
+- The app matches skills itself: when his message contains a skill's words (file name, title or trigger line), that skill's steps are put at the end of the prompt as ACTIVE SKILL for this very message, FastPath is skipped, and text chat gets up to 12 tool steps instead of 4.
+- Voice: the SKILLS list is at the top of the memory with a strict rule (do ALL steps in order, no "should I continue", say done only after the last step), plus use_skill. The "never read the screen" rule now has the exception "unless a skill matches".
+
+## Memory of old talks
+- Conversation history is searchable: the last 800 older turns are indexed with a date. The best 4 matching old messages are added to the prompt, and memory_search finds them too.
+- MemoryKeeper now also writes a one or two sentence summary of each conversation to history/<date>.md (what was discussed, decisions, unfinished tasks), and keeps up to 8 facts per run.
+- History cache raised from 400 to 1,500 turns.
+
+## Not verified
+- Not compiled here. Skills he already made in free form still work: they are matched by file name and title. Re-teaching them once with skill_save gives them proper trigger words.
+- Live voice reads skills when the session connects; a skill taught during the same call becomes active from the next call, but use_skill works at once.
+
 # v0.8 - Faster, smarter memory, real calls
 
 ## Faster
@@ -21,10 +41,8 @@
 - LiveSession.sendText used clientContent. gemini-3.1-flash-live accepts clientContent only to seed history, so notification alerts during a call were probably ignored. It now uses realtimeInput.text, as the Live API guide says.
 
 ## Not verified
-- Nothing was compiled or run here (no Kotlin compiler). Brackets are balanced and every changed line was read. If the build fails, send the Actions log.
-- thinkingLevel "low" is accepted by Gemini 3 Flash models; the fallback covers other models. Check that gemini-flash-latest is the model you want.
-- Voice mode still uses the Live model; FastPath and the thinking setting only speed up text chat and the agent calls. Live memory is loaded when the session connects (the Live model cannot take silent context updates mid-session).
-- "ACTION_CALL from a background service" needs Display over other apps (already required for launching apps).
+- Nothing was compiled or run here (no Kotlin compiler). Skills he already made in free form still work: they are matched by file name and title. Re-teaching them once with skill_save gives them proper trigger words.
+- Live voice reads skills when the session connects; a skill taught during the same call becomes active from the next call, but use_skill works at once.
 
 # v0.6 - Fix, power button, live chat agent
 
